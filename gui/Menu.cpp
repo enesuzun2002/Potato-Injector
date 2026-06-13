@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "Menu.hpp"
 
 #include "dependency/imgui/imgui.h"
@@ -9,32 +9,106 @@
 // Forward declare message handler from imgui_impl_win32.cpp
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
+static void LogRaw(const char* message) {
+	syscalls::LogToFile(message);
+}
+
+static void LogRawHwnd(const char* prefix, HWND hwnd) {
+	char buf[128];
+	sprintf_s(buf, "%s%llu", prefix, reinterpret_cast<uintptr_t>(hwnd));
+	syscalls::LogToFile(buf);
+}
+
+static void LogRawInt(const char* prefix, int value) {
+	char buf[128];
+	sprintf_s(buf, "%s%d", prefix, value);
+	syscalls::LogToFile(buf);
+}
+
+static HWND CreateAndSetupWindow(WNDCLASSEXW& wc)
+{
+	HWND hwnd = NULL;
+	__try
+	{
+		LogRaw("CreateAndSetupWindow: Calling CreateWindow...");
+		hwnd = ::CreateWindow(wc.lpszClassName, L"Potato Injector",
+			WS_POPUP | WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX,
+			100, 100, 200, 200, NULL, NULL, wc.hInstance, NULL);
+		LogRawHwnd("CreateAndSetupWindow: CreateWindow returned hwnd=", hwnd);
+		if (hwnd == NULL) return NULL;
+
+		LogRaw("CreateAndSetupWindow: Calling SetWindowLong...");
+		::SetWindowLong(hwnd, GWL_STYLE, ::GetWindowLong(hwnd, GWL_STYLE)
+			& WS_CAPTION & ~WS_THICKFRAME);
+		LogRaw("CreateAndSetupWindow: SetWindowLong done.");
+
+		LogRaw("CreateAndSetupWindow: Calling SetWindowPos...");
+		::SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+		LogRaw("CreateAndSetupWindow: SetWindowPos done.");
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		LogRawInt("CreateAndSetupWindow: Caught SEH exception! Code: ", GetExceptionCode());
+	}
+	return hwnd;
+}
+
 bool Menu::initialize()
 {
+	syscalls::LogToFile("Menu::initialize: Started.");
+	
+	bool initResult = syscalls::init_syscalls();
+	syscalls::LogToFile("Menu::initialize: init_syscalls returned " + std::to_string(initResult));
+
+	// Hide main thread from debugger
+	syscalls::LogToFile("Menu::initialize: Hiding main thread from debugger...");
+	syscalls::hide_current_thread();
+	syscalls::LogToFile("Menu::initialize: Main thread hidden.");
+
+	// Check if debugger is attached
+	syscalls::LogToFile("Menu::initialize: Querying ProcessDebugPort...");
+	DWORD_PTR debugPort = 0;
+	ULONG returnLength = 0;
+	NTSTATUS status = syscalls::NtQueryInformationProcess(
+		GetCurrentProcess(),
+		7, // ProcessDebugPort
+		&debugPort,
+		sizeof(debugPort),
+		&returnLength
+	);
+	syscalls::LogToFile("Menu::initialize: NtQueryInformationProcess status=" + std::to_string(status) + ", debugPort=" + std::to_string(debugPort));
+	if (status >= 0 && debugPort != 0)
+	{
+		this->isDebugged = true;
+		syscalls::LogToFile("Menu::initialize: Debugger detected via ProcessDebugPort.");
+	}
+
 	// Create application window
-	//ImGui_ImplWin32_EnableDpiAwareness();
-	WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, Menu::WndProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, _T("WC"), NULL };
-	::RegisterClassEx(&wc);
-	this->hwnd = ::CreateWindow(wc.lpszClassName, _T("Potato Injector"),
-		WS_POPUP | WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX,
-		100, 100, 200, 270, NULL, NULL, wc.hInstance, NULL);
-	::SetWindowLong(hwnd, GWL_STYLE, GetWindowLong(hwnd, GWL_STYLE)
-		& WS_CAPTION & ~WS_THICKFRAME);
-	::SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+	syscalls::LogToFile("Menu::initialize: Registering window class...");
+	WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, Menu::WndProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, L"WC", NULL };
+	ATOM registerResult = ::RegisterClassEx(&wc);
+	syscalls::LogToFile("Menu::initialize: RegisterClassEx returned " + std::to_string(registerResult));
+
+	this->hwnd = CreateAndSetupWindow(wc);
+	syscalls::LogToFile("Menu::initialize: Window helper returned hwnd=" + std::to_string(reinterpret_cast<uintptr_t>(this->hwnd)));
 
 	// Initialize Direct3D
+	syscalls::LogToFile("Menu::initialize: Creating D3D9 device...");
 	if (!createD3D9Device(hwnd))
 	{
+		syscalls::LogToFile("Menu::initialize: Failed to create D3D9 device.");
 		cleanupD3D9Device();
 		::UnregisterClass(wc.lpszClassName, wc.hInstance);
-		return 1;
+		return false;
 	}
+	syscalls::LogToFile("Menu::initialize: D3D9 device created.");
 
 	// Show the window
 	::ShowWindow(hwnd, SW_SHOWDEFAULT);
 	::UpdateWindow(hwnd);
 
 	// Setup Dear ImGui context
+	syscalls::LogToFile("Menu::initialize: Initializing Dear ImGui...");
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	ImGuiIO& io = ImGui::GetIO(); (void)io;
@@ -46,11 +120,13 @@ bool Menu::initialize()
 	// Setup Platform/Renderer backends
 	ImGui_ImplWin32_Init(hwnd);
 	ImGui_ImplDX9_Init(this->d3dDevice);
+	syscalls::LogToFile("Menu::initialize: Dear ImGui initialized.");
 
 	this->isMenuOn = true;
+	syscalls::LogToFile("Menu::initialize: Detaching detectGame and updateFiles threads...");
 	std::thread(&Menu::detectGame, this).detach();
-	std::thread(&Menu::detectSteam, this).detach();
 	std::thread(&Menu::updateFiles, this).detach();
+	syscalls::LogToFile("Menu::initialize: Threads detached. Initialization complete.");
 
 	return true;
 }
@@ -80,39 +156,24 @@ void Menu::loop()
 
 		static float f = 0.0f;
 		static int counter = 0;
-		if (!g_injector->shouldAutoStart)
-		{
-			ImGui::SetNextWindowSize({ 200, 250 });
-		}
-		else
-		{
-			ImGui::SetNextWindowSize({ 200, 270 });
-		}
+		ImGui::SetNextWindowSize({ 200, 180 });
 		ImGui::SetNextWindowPos({ 0, 0 });
 		ImGui::Begin("Menu", 0, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
-		ImGui::Text("VAC3 Status: ");               
-		ImGui::SameLine();
+		
 		static int cnt = 0;
 		cnt = cnt + 13 >= 2 * 255 ? 0 : cnt + 13;
 		int alpha = cnt >= 255 ? cnt : 2 * 255 - cnt;
-		ImGui::PushStyleColor(ImGuiCol_Text, g_injector->vacBypassed ? IM_COL32(0, 255, 0, 255) : (this->isPatchingVac ? IM_COL32(255, 255, 0, alpha) : IM_COL32(255, 0, 0, 255)));
-		g_injector->vacBypassed ? ImGui::Text("[BYPASSED]") : (this->isPatchingVac ? ImGui::Text("[PATCHING]") : ImGui::Text("[INSECURE]"));
-		ImGui::PopStyleColor();
-		ImGui::Text("Steam Status: ");
-		ImGui::SameLine(0.0f, 1.0f);
-		ImGui::PushStyleColor(ImGuiCol_Text, g_injector->steamRunning ? IM_COL32(0, 255, 0, 255) : IM_COL32(255, 0, 0, 255));
-		g_injector->steamRunning ? ImGui::Text("[RUNNING]") : ImGui::Text("[OFFLINE]");
-		ImGui::PopStyleColor();
+
 		ImGui::Text("CS2 Status: ");
 		ImGui::SameLine();
 		ImGui::PushStyleColor(ImGuiCol_Text, g_injector->csgoRunning ? (this->isInjecting ? IM_COL32(255, 255, 0, alpha) : IM_COL32(0, 255, 0, 255)) : IM_COL32(255, 0, 0, 255));
 		g_injector->csgoRunning ? (this->isInjecting ? ImGui::Text("[INJECTING]") : ImGui::Text("[RUNNING]")) : ImGui::Text("[OFFLINE]");
 		ImGui::PopStyleColor();
+
 		ImGui::Text("Auto: ");
 		ImGui::SameLine();
 		ImGui::Checkbox("Exit", &g_injector->shouldAutoExit);    //Whether to auto exit after injection
-		ImGui::SameLine();
-		ImGui::Checkbox("Start", &g_injector->shouldAutoStart);  //Whether to auto start game after patching VAC
+		
 		ImGui::Checkbox("Custom process", &g_injector->isCustomProcess);  // Enable injection for other processes
 		
 		static int selectedProcess = 0;
@@ -127,27 +188,20 @@ void Menu::loop()
 				procNames += '\0';
 				nameArr.push_back(p.second);
 			}
-			if(ImGui::Combo("##Processes", &selectedProcess, procNames.c_str()))
-				g_injector->customProcessName = nameArr[selectedProcess];
+			if (!nameArr.empty()) {
+				if (selectedProcess >= static_cast<int>(nameArr.size())) {
+					selectedProcess = 0;
+				}
+				if (ImGui::Combo("##Processes", &selectedProcess, procNames.c_str())) {
+					if (selectedProcess >= 0 && selectedProcess < static_cast<int>(nameArr.size())) {
+						g_injector->customProcessName = nameArr[selectedProcess];
+					}
+				}
+			} else {
+				ImGui::Text("No processes found");
+			}
 		}
 
-		if (g_injector->shouldAutoStart)
-		{
-			std::wstring opts = vars::str_game_launch_opts;
-			std::string str;
-			std::transform(opts.begin(), opts.end(), std::back_inserter(str), [](wchar_t c) {
-				return char(c);
-				});
-			char buf[256];
-			memset(buf, 0, sizeof(buf));
-			memcpy_s(buf, sizeof(buf), str.c_str(), str.length());
-			ImGui::InputText("OPTS", buf, sizeof(buf));
-			opts.clear();
-			std::transform(std::begin(buf), std::end(buf), std::back_inserter(opts), [](char c) {
-				return wchar_t(c);
-			});
-			vars::str_game_launch_opts = opts;
-		}
 		static int selectedDLL = 0;
 		this->mtx.lock();
 		std::vector<std::string> paths = this->filePaths;
@@ -158,16 +212,15 @@ void Menu::loop()
 			comboPaths += path.substr(path.find_last_of('\\') + 1) + '\0';
 		}
 		
-		ImGui::Combo("DLLS", &selectedDLL, comboPaths.c_str());
-		//ImGui::Text("Patch outdated, WOI...");
-		//ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
-		if (ImGui::Button("Patch VAC3"))
-		{
-			if(!this->isPatchingVac)
-				std::thread(&Injector::bypassVAC, g_injector.get()).detach();
+		if (!paths.empty()) {
+			if (selectedDLL >= static_cast<int>(paths.size())) {
+				selectedDLL = 0;
+			}
+			ImGui::Combo("DLLS", &selectedDLL, comboPaths.c_str());
+		} else {
+			ImGui::Text("No DLLs found in ./dlls");
 		}
-		//ImGui::PopItemFlag();
-		ImGui::SameLine(0.0f, -1.0f);
+		
 		if (ImGui::Button("Inject"))
 		{
 			if (!this->isInjecting)
@@ -181,19 +234,12 @@ void Menu::loop()
 						valid = false;
 					}
 				}
-				if (valid && !paths.empty())
+				if (valid && !paths.empty() && selectedDLL >= 0 && selectedDLL < static_cast<int>(paths.size()))
 					std::thread(&Injector::inject, g_injector.get(), paths[selectedDLL]).detach();
 			}
 		}
-		if (this->isPatchingVac)
-		{
-			static int counter = 0;
-			std::string s = "Patching VAC3";
-			for (int i = 0; i < counter / 10; i++) s += ".";
-			counter = counter >= 30 ? 0 : counter + 1;
-			ImGui::Text(s.c_str());
-		}
-		else if (this->isInjecting)
+
+		if (this->isInjecting)
 		{
 			static int counter = 0;
 			std::string s = "Injecting DLL";
@@ -263,8 +309,14 @@ void Menu::cleanupD3D9Device()
 
 LRESULT __stdcall Menu::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-	if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
-		return true;
+	if (msg == WM_DESTROY) {
+		syscalls::LogToFile("WndProc: WM_DESTROY received.");
+	}
+	if (ImGui::GetCurrentContext() != nullptr)
+	{
+		if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
+			return true;
+	}
 
 	switch (msg)
 	{
@@ -357,43 +409,53 @@ void Menu::setupMenuStyle(bool isDarkTheme, float alpha)
 	}
 }
 
-void Menu::detectSteam()
+
+
+void Menu::detectGameInner()
 {
 	while (this->isMenuOn)
 	{
-		DWORD pID = mem::getProcID(vars::str_steam_process_name.data());
-		g_injector->steamRunning = !(pID == NULL);
-		g_injector->vacBypassed = (pID == NULL) ? false : g_injector->vacBypassed;
-		std::this_thread::sleep_for(1s);
+		DWORD pID = mem::getProcID(vars::get_game_process_name());
+		g_injector->csgoRunning = (pID != NULL);
+		std::this_thread::sleep_for(std::chrono::seconds(1));
 	}
 }
 
-void Menu::detectGame()
-{
-	while (this->isMenuOn)
-	{
-		DWORD pID = mem::getProcID(vars::str_game_process_name.data());
-		g_injector->csgoRunning = !(pID == NULL);
-		std::this_thread::sleep_for(1s);
+void Menu::detectGame() {
+	__try {
+		syscalls::hide_current_thread();
+		this->detectGameInner();
+	}
+	__except (syscalls::LogSehException("detectGame", GetExceptionCode()), EXCEPTION_EXECUTE_HANDLER) {
 	}
 }
 
-void Menu::updateFiles()
+void Menu::updateFilesInner()
 {
-	if (!std::filesystem::is_directory(vars::str_dll_dir_path) || !std::filesystem::exists(vars::str_dll_dir_path)) { // Check if src folder exists
-		std::filesystem::create_directory(vars::str_dll_dir_path); // create src folder
+	std::wstring dllDir = vars::get_dll_dir_path();
+	if (!std::filesystem::is_directory(dllDir) || !std::filesystem::exists(dllDir)) {
+		std::filesystem::create_directory(dllDir);
 	}
 	
 	while (this->isMenuOn)
 	{
 		this->mtx.lock();
 		this->filePaths.clear();
-		for (const auto& file : std::filesystem::directory_iterator(vars::str_dll_dir_path))
+		for (const auto& file : std::filesystem::directory_iterator(dllDir))
 		{
 			if (!std::filesystem::is_directory(file) && (file.path().string().substr(file.path().string().find_last_of(".") + 1) == "dll"))
 				this->filePaths.push_back(file.path().string());
 		}
 		this->mtx.unlock();
-		std::this_thread::sleep_for(1s);
+		std::this_thread::sleep_for(std::chrono::seconds(1));
+	}
+}
+
+void Menu::updateFiles() {
+	__try {
+		syscalls::hide_current_thread();
+		this->updateFilesInner();
+	}
+	__except (syscalls::LogSehException("updateFiles", GetExceptionCode()), EXCEPTION_EXECUTE_HANDLER) {
 	}
 }

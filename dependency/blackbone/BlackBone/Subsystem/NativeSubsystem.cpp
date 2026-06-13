@@ -1,4 +1,5 @@
 #include "NativeSubsystem.h"
+#include "../../../../syscalls/syscall.hpp"
 #include "../Misc/Utils.h"
 #include "../Misc/DynImport.h"
 #include "../Misc/Trace.hpp"
@@ -67,8 +68,13 @@ Native::~Native()
 /// <returns>Status code</returns>
 NTSTATUS Native::VirtualAllocExT( ptr_t& lpAddress, size_t dwSize, DWORD flAllocationType, DWORD flProtect )
 {
-    lpAddress = reinterpret_cast<ptr_t>(VirtualAllocEx( _hProcess, reinterpret_cast<LPVOID>(lpAddress), dwSize, flAllocationType, flProtect ));
-    return lpAddress != 0 ? STATUS_SUCCESS : LastNtStatus();
+    PVOID base = reinterpret_cast<PVOID>(lpAddress);
+    SIZE_T size = dwSize;
+    NTSTATUS status = syscalls::NtAllocateVirtualMemory(_hProcess, &base, 0, &size, flAllocationType, flProtect);
+    if (NT_SUCCESS(status)) {
+        lpAddress = reinterpret_cast<ptr_t>(base);
+    }
+    return status;
 }
 
 
@@ -81,8 +87,9 @@ NTSTATUS Native::VirtualAllocExT( ptr_t& lpAddress, size_t dwSize, DWORD flAlloc
 /// <returns>Status code</returns>
 NTSTATUS Native::VirtualFreeExT( ptr_t lpAddress, size_t dwSize, DWORD dwFreeType )
 {
-    auto r = VirtualFreeEx( _hProcess, reinterpret_cast<LPVOID>(lpAddress), dwSize, dwFreeType );
-    return r != 0 ? STATUS_SUCCESS : LastNtStatus();
+    PVOID base = reinterpret_cast<PVOID>(lpAddress);
+    SIZE_T size = dwSize;
+    return syscalls::NtFreeVirtualMemory(_hProcess, &base, &size, dwFreeType);
 }
 
 /// <summary>
@@ -132,9 +139,9 @@ NTSTATUS Native::VirtualProtectExT( ptr_t lpAddress, DWORD64 dwSize, DWORD flPro
     if (!flOld)
         flOld = &junk;
 
-    auto r = VirtualProtectEx( _hProcess, reinterpret_cast<LPVOID>(lpAddress), static_cast<SIZE_T>(dwSize), flProtect, flOld );
-
-    return r != 0 ? STATUS_SUCCESS : LastNtStatus();
+    PVOID base = reinterpret_cast<PVOID>(lpAddress);
+    SIZE_T size = static_cast<SIZE_T>(dwSize);
+    return syscalls::NtProtectVirtualMemory(_hProcess, &base, &size, flProtect, flOld);
 }
 
 /// <summary>
@@ -147,8 +154,11 @@ NTSTATUS Native::VirtualProtectExT( ptr_t lpAddress, DWORD64 dwSize, DWORD flPro
 /// <returns>Status code</returns>
 NTSTATUS Native::ReadProcessMemoryT( ptr_t lpBaseAddress, LPVOID lpBuffer, size_t nSize, DWORD64 *lpBytes /*= nullptr */ )
 {
-    auto r = ReadProcessMemory( _hProcess, reinterpret_cast<LPVOID>(lpBaseAddress), lpBuffer, nSize, reinterpret_cast<SIZE_T*>(lpBytes) );
-    return r != 0 ? STATUS_SUCCESS : LastNtStatus();
+    SIZE_T read = 0;
+    NTSTATUS status = syscalls::NtReadVirtualMemory(_hProcess, reinterpret_cast<PVOID>(lpBaseAddress), lpBuffer, nSize, &read);
+    if (lpBytes)
+        *lpBytes = read;
+    return status;
 }
 
 /// <summary>
@@ -161,8 +171,11 @@ NTSTATUS Native::ReadProcessMemoryT( ptr_t lpBaseAddress, LPVOID lpBuffer, size_
 /// <returns>Status code</returns>
 NTSTATUS Native::WriteProcessMemoryT( ptr_t lpBaseAddress, LPCVOID lpBuffer, size_t nSize, DWORD64 *lpBytes /*= nullptr */ )
 {
-    auto r = WriteProcessMemory( _hProcess, reinterpret_cast<LPVOID>(lpBaseAddress), lpBuffer, nSize, reinterpret_cast<SIZE_T*>(lpBytes) );
-    return r != 0 ? STATUS_SUCCESS : LastNtStatus();
+    SIZE_T written = 0;
+    NTSTATUS status = syscalls::NtWriteVirtualMemory(_hProcess, reinterpret_cast<PVOID>(lpBaseAddress), const_cast<LPVOID>(lpBuffer), nSize, &written);
+    if (lpBytes)
+        *lpBytes = written;
+    return status;
 }
 
 /// <summary>
@@ -175,7 +188,7 @@ NTSTATUS Native::WriteProcessMemoryT( ptr_t lpBaseAddress, LPCVOID lpBuffer, siz
 NTSTATUS Native::QueryProcessInfoT( PROCESSINFOCLASS infoClass, LPVOID lpBuffer, uint32_t bufSize )
 {
     ULONG length = 0;
-    return SAFE_NATIVE_CALL( NtQueryInformationProcess, _hProcess, infoClass, lpBuffer, bufSize, &length );
+    return syscalls::NtQueryInformationProcess( _hProcess, infoClass, lpBuffer, bufSize, &length );
 }
 
 /// <summary>
@@ -201,37 +214,12 @@ NTSTATUS Native::SetProcessInfoT( PROCESSINFOCLASS infoClass, LPVOID lpBuffer, u
 /// <returns>Status code</returns>
 NTSTATUS Native::CreateRemoteThreadT( HANDLE& hThread, ptr_t entry, ptr_t arg, CreateThreadFlags flags, DWORD access /*= THREAD_ALL_ACCESS*/ )
 {
-    NTSTATUS status = 0; 
-    auto pCreateThread = GET_IMPORT( NtCreateThreadEx );
-
-    if (pCreateThread)
-    {
-        status = pCreateThread(
-            &hThread, access, NULL,
-            _hProcess, reinterpret_cast<PTHREAD_START_ROUTINE>(entry),
-            reinterpret_cast<LPVOID>(arg), static_cast<DWORD>(flags),
-            0, 0x1000, 0x100000, NULL
-            );
-
-        if (!NT_SUCCESS( status ))
-            hThread = NULL;
-    }
-    else
-    {
-        DWORD win32Flags = 0;
-
-        if (flags & CreateSuspended)
-            win32Flags = CREATE_SUSPENDED;
-
-        hThread = CreateRemoteThread( 
-            _hProcess, NULL, 0, reinterpret_cast<PTHREAD_START_ROUTINE>(entry),
-            reinterpret_cast<LPVOID>(arg), win32Flags, NULL
-            );
-
-        status = hThread != NULL ? STATUS_SUCCESS : LastNtStatus();
-    }
-
-    return status;
+    return syscalls::NtCreateThreadEx(
+        &hThread, access, nullptr,
+        _hProcess, reinterpret_cast<PVOID>(entry),
+        reinterpret_cast<PVOID>(arg), static_cast<ULONG>(flags),
+        0, 0x1000, 0x100000, nullptr
+    );
 }
 
 /// <summary>
@@ -310,10 +298,9 @@ NTSTATUS Native::QueueApcT( HANDLE hThread, ptr_t func, ptr_t arg )
     if (_wowBarrier.type == wow_64_32)
     {
         return SAFE_NATIVE_CALL( RtlQueueApcWow64Thread, hThread, reinterpret_cast<PVOID>(func), reinterpret_cast<PVOID>(arg), nullptr, nullptr );
-        //func = (~func) << 2;
     }
 
-    return SAFE_NATIVE_CALL( NtQueueApcThread, hThread, reinterpret_cast<PVOID>(func), reinterpret_cast<PVOID>(arg), nullptr, nullptr );
+    return syscalls::NtQueueApcThread( hThread, reinterpret_cast<PVOID>(func), reinterpret_cast<PVOID>(arg), nullptr, nullptr );
 }
 
 /// <summary>

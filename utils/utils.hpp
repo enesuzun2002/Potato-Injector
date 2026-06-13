@@ -1,11 +1,33 @@
 #pragma once
-#include "winreg/winreg.hpp"
+#include <string>
+#include <algorithm>
+#include <cwctype>
+#include <cctype>
+#include <fstream>
+#include <vector>
+#include <filesystem>
 
 namespace string
 {
 	inline std::wstring toLower(std::wstring s) {
-		std::transform(s.begin(), s.begin(), s.end(), static_cast<int(*)(int)>(&std::tolower));
+		std::transform(s.begin(), s.end(), s.begin(), [](wchar_t c) {
+			return std::towlower(c);
+		});
 		return s;
+	}
+
+	inline std::string toLower(std::string s) {
+		std::transform(s.begin(), s.end(), s.begin(), [](char c) {
+			return std::tolower(static_cast<unsigned char>(c));
+		});
+		return s;
+	}
+
+	template<typename T>
+	inline std::string toHex(T val) {
+		char buf[32];
+		sprintf_s(buf, "0x%llX", static_cast<unsigned long long>(val));
+		return std::string(buf);
 	}
 
 	template<typename ... arg>
@@ -20,11 +42,6 @@ namespace string
 
 namespace utils
 {
-	inline std::wstring getSteamPath() {
-		winreg::RegKey key{ HKEY_CURRENT_USER, L"SOFTWARE\\Valve\\Steam" };
-		auto path = key.GetStringValue(L"SteamExe");
-		return path;
-	}
 
 	inline bool readFileToMem(const std::filesystem::path& path, std::vector<BYTE>& buffer) {
 		std::ifstream file(path, std::ios::binary);

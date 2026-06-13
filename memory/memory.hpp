@@ -1,5 +1,6 @@
 #pragma once
 #include "utils/utils.hpp"
+#include <set>
 
 namespace mem
 {
@@ -9,33 +10,87 @@ namespace mem
 		}
 	};
 
-	inline bool isSystemProcess(const std::wstring& name) {
+	inline bool isSystemProcess(std::wstring name) {
+		name = string::toLower(name);
 		static const std::set<std::wstring> systemProcesses = {
-			L"System", L"svchost.exe", L"csrss.exe", L"smss.exe", L"wininit.exe", L"services.exe"
+			L"system", L"svchost.exe", L"csrss.exe", L"smss.exe", L"wininit.exe", L"services.exe"
 		};
 		return systemProcesses.find(name) != systemProcesses.end();
 	}
 
+	struct MY_SYSTEM_PROCESS_INFORMATION {
+		ULONG NextEntryOffset;
+		ULONG NumberOfThreads;
+		LARGE_INTEGER WorkingSetPrivateSize;
+		ULONG HardFaultCount;
+		ULONG NumberOfThreadsHighWatermark;
+		ULONGLONG CycleTime;
+		FILETIME CreateTime;
+		FILETIME UserTime;
+		FILETIME KernelTime;
+		UNICODE_STRING ImageName;
+		LONG BasePriority;
+		HANDLE UniqueProcessId;
+		HANDLE InheritedFromUniqueProcessId;
+	};
+
 	inline std::set<std::pair<std::uint32_t, std::wstring>, CompareProc> getProcList() {
 		std::set<std::pair<std::uint32_t, std::wstring>, CompareProc> procList;
 
-		auto hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
+		ULONG size = 1 << 18; // 256KB
+		std::vector<BYTE> buffer(size);
+		NTSTATUS status;
 
-		PROCESSENTRY32 e;
-		e.dwSize = sizeof(e);
+		while ((status = syscalls::NtQuerySystemInformation(5, buffer.data(), size, &size)) == 0xC0000004) { // STATUS_INFO_LENGTH_MISMATCH
+			buffer.resize(size);
+		}
 
-		if (!Process32First(hSnap, &e)) {
-			CloseHandle(hSnap);
+		if (!NT_SUCCESS(status)) {
+			syscalls::LogToFile("getProcList: NtQuerySystemInformation failed with status " + std::to_string(status));
 			return {};
 		}
 
-		do {
-			if (!isSystemProcess(e.szExeFile)) {
-				procList.insert(std::make_pair(e.th32ProcessID, e.szExeFile));
-			}
-		} while (Process32Next(hSnap, &e));
+		uintptr_t bufStart = reinterpret_cast<uintptr_t>(buffer.data());
+		uintptr_t bufEnd = bufStart + buffer.size();
 
-		CloseHandle(hSnap);
+		auto pInfo = reinterpret_cast<MY_SYSTEM_PROCESS_INFORMATION*>(buffer.data());
+		while (true) {
+			uintptr_t currentPtr = reinterpret_cast<uintptr_t>(pInfo);
+			if (currentPtr < bufStart || currentPtr + sizeof(MY_SYSTEM_PROCESS_INFORMATION) > bufEnd) {
+				syscalls::LogToFile("getProcList: Error: pInfo structure out of bounds!");
+				break;
+			}
+
+			std::wstring procName;
+			if (pInfo->ImageName.Buffer && pInfo->ImageName.Length > 0) {
+				uintptr_t strPtr = reinterpret_cast<uintptr_t>(pInfo->ImageName.Buffer);
+				if (strPtr >= bufStart && strPtr + pInfo->ImageName.Length <= bufEnd) {
+					procName = std::wstring(pInfo->ImageName.Buffer, pInfo->ImageName.Length / sizeof(wchar_t));
+				} else {
+					syscalls::LogToFile("getProcList: Warning: ImageName.Buffer pointer out of bounds!");
+				}
+			}
+
+			if (!procName.empty() && !isSystemProcess(procName)) {
+				procList.insert(std::make_pair(static_cast<std::uint32_t>(reinterpret_cast<uintptr_t>(pInfo->UniqueProcessId)), procName));
+			}
+
+			if (pInfo->NextEntryOffset == 0) break;
+			
+			if (pInfo->NextEntryOffset < sizeof(MY_SYSTEM_PROCESS_INFORMATION)) {
+				syscalls::LogToFile("getProcList: Warning: NextEntryOffset is invalid (" + std::to_string(pInfo->NextEntryOffset) + ")!");
+				break;
+			}
+
+			uintptr_t nextPtr = currentPtr + pInfo->NextEntryOffset;
+			if (nextPtr < bufStart || nextPtr + sizeof(MY_SYSTEM_PROCESS_INFORMATION) > bufEnd) {
+				syscalls::LogToFile("getProcList: Error: Next entry pointer out of bounds!");
+				break;
+			}
+
+			pInfo = reinterpret_cast<MY_SYSTEM_PROCESS_INFORMATION*>(reinterpret_cast<BYTE*>(pInfo) + pInfo->NextEntryOffset);
+		}
+
 		return procList;
 	}
 
@@ -51,33 +106,10 @@ namespace mem
 
 			if (curprocname == targetName)
 			{
-				HANDLE hProc = OpenProcess(PROCESS_VM_READ, false, proc.first);
-				if (hProc != nullptr)
-				{
-					CloseHandle(hProc);
-					return proc.first;
-				}
+				return proc.first;
 			}
 		}
 
 		return NULL;
-	}
-
-	inline bool openProcess(std::wstring exePath, std::vector<std::wstring> args, PROCESS_INFORMATION& pi) {
-		STARTUPINFO si;
-		{
-			ZeroMemory(&si, sizeof(si));
-			si.cb = sizeof(si);
-		}
-
-		ZeroMemory(&pi, sizeof(pi));
-
-		std::wstring procCmdLine = exePath;
-		for (auto& arg : args) {
-			procCmdLine += L" " + arg;
-		}
-
-		return CreateProcess(nullptr, procCmdLine.data(), nullptr, nullptr, false, NULL, nullptr,
-			nullptr, &si, &pi);
 	}
 }

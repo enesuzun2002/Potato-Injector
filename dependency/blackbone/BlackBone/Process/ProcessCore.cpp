@@ -1,5 +1,6 @@
 #include "../Config.h"
 #include "ProcessCore.h"
+#include "../../../../syscalls/syscall.hpp"
 #include "../Misc/DynImport.h"
 #include "../Include/Macro.h"
 #include <3rd_party/VersionApi.h>
@@ -29,12 +30,27 @@ ProcessCore::~ProcessCore()
 /// <returns>Status</returns>
 NTSTATUS ProcessCore::Open( DWORD pid, DWORD access )
 {
-    // Handle current process differently
-    _hProcess = (pid == GetCurrentProcessId()) ? GetCurrentProcess() : OpenProcess( access, false, pid );
+    // Constrain access mask to prevent loud IoCs (Phase 3b)
+    DWORD constrainedAccess = access;
+    if (pid != GetCurrentProcessId()) {
+        constrainedAccess = PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION | PROCESS_DUP_HANDLE | PROCESS_CREATE_THREAD;
+    }
 
-    // Some routines in win10 do not support pseudo handle
-    if (IsWindows10OrGreater() && pid == GetCurrentProcessId())
-        _hProcess = OpenProcess( PROCESS_ALL_ACCESS, FALSE, pid );
+    if (pid == GetCurrentProcessId())
+    {
+        _hProcess = GetCurrentProcess();
+        if (IsWindows10OrGreater()) {
+            CLIENT_ID cid = { reinterpret_cast<HANDLE>(static_cast<uintptr_t>(pid)), nullptr };
+            OBJECT_ATTRIBUTES oa = { sizeof(oa) };
+            syscalls::NtOpenProcess(&_hProcess, PROCESS_ALL_ACCESS, &oa, &cid);
+        }
+    }
+    else
+    {
+        CLIENT_ID cid = { reinterpret_cast<HANDLE>(static_cast<uintptr_t>(pid)), nullptr };
+        OBJECT_ATTRIBUTES oa = { sizeof(oa) };
+        syscalls::NtOpenProcess(&_hProcess, constrainedAccess, &oa, &cid);
+    }
 
     if (_hProcess)
     {
@@ -57,8 +73,11 @@ NTSTATUS ProcessCore::Open( HANDLE handle )
     _pid = GetProcessId( _hProcess );
 
     // Some routines in win10 do not support pseudo handle
-    if (IsWindows10OrGreater() && _pid == GetCurrentProcessId())
-        _hProcess = OpenProcess( PROCESS_ALL_ACCESS, FALSE, _pid );
+    if (IsWindows10OrGreater() && _pid == GetCurrentProcessId()) {
+        CLIENT_ID cid = { reinterpret_cast<HANDLE>(static_cast<uintptr_t>(_pid)), nullptr };
+        OBJECT_ATTRIBUTES oa = { sizeof(oa) };
+        syscalls::NtOpenProcess(&_hProcess, PROCESS_ALL_ACCESS, &oa, &cid);
+    }
 
     return Init();
 }

@@ -139,7 +139,10 @@ NTSTATUS NativeWow64::WriteProcessMemoryT( ptr_t lpBaseAddress, LPCVOID lpBuffer
     
     if (_wowBarrier.targetWow64 && lpBaseAddress < NativeWow64::maxAddr32()) {
         SetLastNtStatus(STATUS_SUCCESS);
-        WriteProcessMemory(_hProcess, reinterpret_cast<LPVOID>(lpBaseAddress), lpBuffer, nSize, reinterpret_cast<SIZE_T*>(lpBytes));
+        typedef BOOL(WINAPI* WriteProcessMemoryFn)(HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T*);
+        static auto fnWriteProcessMemory = (WriteProcessMemoryFn)GetProcAddress(GetModuleHandleA("kernel32.dll"), "WriteProcessMemory");
+        if (fnWriteProcessMemory)
+            fnWriteProcessMemory(_hProcess, reinterpret_cast<LPVOID>(lpBaseAddress), lpBuffer, nSize, reinterpret_cast<SIZE_T*>(lpBytes));
         return LastNtStatus();
     }
     

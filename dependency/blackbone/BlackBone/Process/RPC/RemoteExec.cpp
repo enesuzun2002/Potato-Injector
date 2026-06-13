@@ -1,3 +1,4 @@
+#include "../../../../../syscalls/syscall.hpp"
 #include "RemoteExec.h"
 #include "../Process.h"
 #include "../../Misc/DynImport.h"
@@ -317,8 +318,10 @@ DWORD RemoteExec::ExecDirect( ptr_t pCode, ptr_t arg )
 /// <param name="mode">Worket thread mode</param>
 /// <param name="bEvent">Create sync event for worker thread</param>
 /// <returns>Status</returns>
+
 NTSTATUS RemoteExec::CreateRPCEnvironment( WorkerThreadMode mode /*= Worker_None*/, bool bEvent /*= false*/ )
 {
+    syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: started. Mode: " + std::to_string(mode) + ", bEvent: " + std::to_string(bEvent));
     DWORD thdID = GetTickCount();       // randomize thread id
     NTSTATUS status = STATUS_SUCCESS;
 
@@ -327,8 +330,10 @@ NTSTATUS RemoteExec::CreateRPCEnvironment( WorkerThreadMode mode /*= Worker_None
         if (!result.valid())
         {
             auto mem = _memory.Allocate( size, prot );
-            if (!mem)
+            if (!mem) {
+                syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: _memory.Allocate failed with: " + syscalls::toHex(mem.status));
                 return mem.status;
+            }
                 
             result = std::move( *mem );
         }
@@ -339,40 +344,65 @@ NTSTATUS RemoteExec::CreateRPCEnvironment( WorkerThreadMode mode /*= Worker_None
     //
     // Allocate environment codecave
     //
-    if (!NT_SUCCESS( status = allocMem( _workerCode ) ))
+    if (!NT_SUCCESS( status = allocMem( _workerCode ) )) {
+        syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: allocMem(_workerCode) failed: " + syscalls::toHex(status));
         return status;
-    if (!NT_SUCCESS( status = allocMem( _userCode[0] ) ))
+    }
+    if (!NT_SUCCESS( status = allocMem( _userCode[0] ) )) {
+        syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: allocMem(_userCode[0]) failed: " + syscalls::toHex(status));
         return status;
-    if (!NT_SUCCESS( status = allocMem( _userCode[1] ) ))
+    }
+    if (!NT_SUCCESS( status = allocMem( _userCode[1] ) )) {
+        syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: allocMem(_userCode[1]) failed: " + syscalls::toHex(status));
         return status;
-    if (!NT_SUCCESS( status = allocMem( _userData[0], 0x4000, PAGE_READWRITE ) ))
+    }
+    if (!NT_SUCCESS( status = allocMem( _userData[0], 0x4000, PAGE_READWRITE ) )) {
+        syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: allocMem(_userData[0]) failed: " + syscalls::toHex(status));
         return status;
-    if (!NT_SUCCESS( status = allocMem( _userData[1], 0x4000, PAGE_READWRITE ) ))
+    }
+    if (!NT_SUCCESS( status = allocMem( _userData[1], 0x4000, PAGE_READWRITE ) )) {
+        syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: allocMem(_userData[1]) failed: " + syscalls::toHex(status));
         return status;
+    }
 
     // Create RPC thread
     if (mode == Worker_CreateNew)
     {
+        syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: Creating worker thread...");
         auto thd = CreateWorkerThread();
-        if (!thd)
+        if (!thd) {
+            syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: CreateWorkerThread failed: " + syscalls::toHex(thd.status));
             return thd.status;
+        }
 
         thdID = thd.result();
+        syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: Worker thread created. ID: " + std::to_string(thdID));
     }
     // Get thread to hijack
     else if (mode == Worker_UseExisting)
     {
+        syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: Getting thread to hijack...");
         _hijackThread = _process.threads().getMostExecuted();
-        if (!_hijackThread)
+        if (!_hijackThread) {
+            syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: getMostExecuted returned null thread!");
             return STATUS_INVALID_THREAD;
+        }
 
         thdID = _hijackThread->id();
+        syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: Selected thread to hijack ID: " + std::to_string(thdID));
     }
 
     // Create RPC sync event
-    if (bEvent)
+    if (bEvent) {
+        syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: Creating APC Event...");
         status = CreateAPCEvent( thdID );
+        if (!NT_SUCCESS(status)) {
+            syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: CreateAPCEvent failed: " + syscalls::toHex(status));
+            return status;
+        }
+    }
 
+    syscalls::LogToFile("RemoteExec::CreateRPCEnvironment: completed successfully.");
     return status;
 }
 
@@ -456,6 +486,7 @@ NTSTATUS RemoteExec::CreateAPCEvent( DWORD threadID )
     if (_hWaitEvent)
         return STATUS_SUCCESS;
 
+    syscalls::LogToFile("RemoteExec::CreateAPCEvent: Creating wait event for ThreadID: " + std::to_string(threadID));
     auto a = AsmFactory::GetAssembler( _process.core().isWow64() );
 
     wchar_t pEventName[128] = { };
@@ -481,21 +512,39 @@ NTSTATUS RemoteExec::CreateAPCEvent( DWORD threadID )
     obAttr.SecurityDescriptor = pDescriptor;
 
     auto pOpenEvent = _mods.GetNtdllExport( "NtOpenEvent", mt_default, Sections );
-    if (!pOpenEvent)
+    if (!pOpenEvent) {
+        syscalls::LogToFile("RemoteExec::CreateAPCEvent: GetNtdllExport NtOpenEvent failed: " + syscalls::toHex(pOpenEvent.status));
         return pOpenEvent.status;
+    }
 
     auto status = SAFE_NATIVE_CALL( NtCreateEvent, &_hWaitEvent, EVENT_ALL_ACCESS, &obAttr, 0, static_cast<BOOLEAN>(FALSE) );
-    if (!NT_SUCCESS( status ))
+    if (!NT_SUCCESS( status )) {
+        syscalls::LogToFile("RemoteExec::CreateAPCEvent: NtCreateEvent failed: " + syscalls::toHex(status));
         return status;
+    }
+    syscalls::LogToFile("RemoteExec::CreateAPCEvent: NtCreateEvent created wait event successfully.");
 
     HANDLE hRemoteHandle = nullptr;
-    if (!DuplicateHandle( GetCurrentProcess(), _hWaitEvent, _process.core().handle(), &hRemoteHandle, 0, FALSE, DUPLICATE_SAME_ACCESS ))
+    if (!DuplicateHandle( GetCurrentProcess(), _hWaitEvent, _process.core().handle(), &hRemoteHandle, 0, FALSE, DUPLICATE_SAME_ACCESS )) {
+        DWORD err = GetLastError();
+        syscalls::LogToFile("RemoteExec::CreateAPCEvent: DuplicateHandle failed! Win32 Error: " + std::to_string(err) + ", Target Process Handle: " + syscalls::toHex(reinterpret_cast<uintptr_t>(_process.core().handle())));
         return LastNtStatus();
+    }
+    syscalls::LogToFile("RemoteExec::CreateAPCEvent: DuplicateHandle succeeded. Remote Handle: " + syscalls::toHex(reinterpret_cast<uintptr_t>(hRemoteHandle)));
 
     status = _userData[0].Write( EVENT_OFFSET, sizeof( uintptr_t ), &hRemoteHandle );
-    if (!NT_SUCCESS( status ))
+    if (!NT_SUCCESS( status )) {
+        syscalls::LogToFile("RemoteExec::CreateAPCEvent: _userData[0].Write failed: " + syscalls::toHex(status));
         return status;
-    return _userData[1].Write( EVENT_OFFSET, sizeof( uintptr_t ), &hRemoteHandle );
+    }
+    status = _userData[1].Write( EVENT_OFFSET, sizeof( uintptr_t ), &hRemoteHandle );
+    if (!NT_SUCCESS( status )) {
+        syscalls::LogToFile("RemoteExec::CreateAPCEvent: _userData[1].Write failed: " + syscalls::toHex(status));
+        return status;
+    }
+    
+    syscalls::LogToFile("RemoteExec::CreateAPCEvent: Completed successfully.");
+    return STATUS_SUCCESS;
 }
 
 /// <summary>

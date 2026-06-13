@@ -61,7 +61,12 @@ bool DetourBase::AllocateBuffer( uint8_t* nearest )
 bool DetourBase::DisableHook()
 {
     if (_type == HookType::InternalInline || _type == HookType::Int3)
-        WriteProcessMemory( GetCurrentProcess(), _original, _origCode, _origSize, NULL );
+    {
+        typedef BOOL(WINAPI* WriteProcessMemoryFn)(HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T*);
+        static auto fnWriteProcessMemory = (WriteProcessMemoryFn)GetProcAddress(GetModuleHandleA("kernel32.dll"), "WriteProcessMemory");
+        if (fnWriteProcessMemory)
+            fnWriteProcessMemory( GetCurrentProcess(), _original, _origCode, _origSize, NULL );
+    }
     else if (_type == HookType::HWBP)
         ToggleHBP( _hwbpIdx[GetCurrentThreadId()], false );
 
@@ -75,7 +80,12 @@ bool DetourBase::DisableHook()
 bool DetourBase::EnableHook()
 {
     if (_type == HookType::InternalInline || _type == HookType::Int3)
-        WriteProcessMemory( GetCurrentProcess(), _original, _newCode, _origSize, NULL );
+    {
+        typedef BOOL(WINAPI* WriteProcessMemoryFn)(HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T*);
+        static auto fnWriteProcessMemory = (WriteProcessMemoryFn)GetProcAddress(GetModuleHandleA("kernel32.dll"), "WriteProcessMemory");
+        if (fnWriteProcessMemory)
+            fnWriteProcessMemory( GetCurrentProcess(), _original, _newCode, _origSize, NULL );
+    }
     else if (_type == HookType::HWBP)
         ToggleHBP( _hwbpIdx[GetCurrentThreadId()], true );
 

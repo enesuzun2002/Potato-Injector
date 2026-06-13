@@ -10,6 +10,12 @@ public:
 
 	void loop();
 
+	void detectGame();
+	void detectGameInner();
+
+	void updateFiles();
+	void updateFilesInner();
+
 private:
 	bool createD3D9Device(HWND hWnd);
 
@@ -19,12 +25,6 @@ private:
 
 	void setupMenuStyle(bool isDarkTheme, float alpha);
 
-	void detectSteam();
-
-	void detectGame();
-
-	void updateFiles();
-
 private:
 	LPDIRECT3D9              pD3D = NULL;
 	LPDIRECT3DDEVICE9        d3dDevice = NULL;
@@ -32,8 +32,8 @@ private:
 	HWND					 hwnd{ NULL };
 
 	bool isMenuOn{ false };
-	bool isPatchingVac{ false };
 	bool isInjecting{ false };
+	bool isDebugged{ false };
 
 	std::vector<std::string> filePaths;
 

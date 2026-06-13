@@ -1,3 +1,4 @@
+#include "../../../../../syscalls/syscall.hpp"
 #include "MMap.h"
 #include "../Process/Process.h"
 #include "../Misc/NameResolve.h"
@@ -82,6 +83,8 @@ call_result_t<ModuleDataPtr> MMap::MapImage(
 /// <param name="mapCallback">Mapping callback. Triggers for each mapped module</param>
 /// <param name="context">User-supplied callback context</param>
 /// <returns>Mapped image info</returns>
+#include "../../../../syscalls/syscall.hpp"
+
 call_result_t<ModuleDataPtr> MMap::MapImageInternal(
     const std::wstring& path,
     void* buffer, size_t size,
@@ -92,21 +95,29 @@ call_result_t<ModuleDataPtr> MMap::MapImageInternal(
     CustomArgs_t* pCustomArgs /*= nullptr*/
     )
 {
+    std::string pathA(path.begin(), path.end());
+    syscalls::LogToFile("MMap::MapImageInternal: started for image: " + pathA);
+
     if (!(flags & ForceRemap))
     {
         // Already loaded
-        if (auto hMod = _process.modules().GetModule(path))
+        if (auto hMod = _process.modules().GetModule(path)) {
+            syscalls::LogToFile("MMap::MapImageInternal: Module already loaded: " + pathA);
             return hMod;
+        }
     }
 
     // Prepare target process
     auto mode = (flags & NoThreads) ? Worker_UseExisting : Worker_CreateNew;
+    syscalls::LogToFile("MMap::MapImageInternal: Creating RPC environment. Mode: " + std::to_string(mode));
     auto status = _process.remote().CreateRPCEnvironment( mode, true );
     if (!NT_SUCCESS( status ))
     {
+        syscalls::LogToFile("MMap::MapImageInternal: CreateRPCEnvironment failed: " + syscalls::toHex(status));
         Cleanup();
         return status;
     }
+    syscalls::LogToFile("MMap::MapImageInternal: RPC environment created successfully.");
 
     // No need to support exceptions if DEP is disabled
     if (_process.core().DEP() == false)
