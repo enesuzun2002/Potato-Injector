@@ -32,6 +32,8 @@
 *.out
 *.app
 
+implementation_plan.md
+
 .vs/*
 Debug/
 Release/
